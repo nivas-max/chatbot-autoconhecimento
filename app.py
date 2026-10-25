@@ -1,13 +1,8 @@
 import streamlit as st
 import io
-import re
-import json
-import base64
-import urllib.request
-import urllib.error
 from xml.sax.saxutils import escape
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, KeepTogether
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A4
@@ -368,44 +363,6 @@ def gerar_pdf(nome, idade, contagem, resultado, vencedores):
     return buffer.getvalue()
 
 
-def obter_config_email():
-    # Na ausência dos Secrets, o download continua disponível.
-    try:
-        chave = st.secrets.get("RESEND_API_KEY", "")
-        remetente = st.secrets.get("EMAIL_REMETENTE", "")
-        return str(chave).strip(), str(remetente).strip()
-    except (FileNotFoundError, KeyError):
-        return "", ""
-
-
-def enviar_pdf_por_email(destinatario, nome, pdf_bytes):
-    chave, remetente = obter_config_email()
-    if not chave or not remetente:
-        raise ValueError("Envio por e-mail não configurado pelo responsável pelo aplicativo.")
-    payload = {
-        "from": remetente,
-        "to": [destinatario],
-        "subject": "Seu relatório de autoconhecimento",
-        "html": (f"<p>Olá, {escape(nome)}!</p>"
-                 "<p>Segue em anexo seu relatório de autoconhecimento em PDF.</p>"
-                 "<p>Obrigado por participar!</p>"),
-        "attachments": [{"filename": "relatorio_autoconhecimento.pdf",
-                         "content": base64.b64encode(pdf_bytes).decode("ascii")}]
-    }
-    requisicao = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {chave}", "Content-Type": "application/json",
-                 "User-Agent": "AutoconhecimentoStreamlit/1.0"},
-        method="POST",
-    )
-    with urllib.request.urlopen(requisicao, timeout=20) as resposta:
-        retorno = json.loads(resposta.read().decode("utf-8"))
-    if not retorno.get("id"):
-        raise RuntimeError("O serviço de e-mail não confirmou a solicitação.")
-    return retorno["id"]
-
-
 # Inicia uma conversa separada para cada visitante.
 if "etapa" not in st.session_state:
     st.session_state.etapa = "nome"
@@ -536,42 +493,7 @@ elif etapa == "resultado":
         use_container_width=True,
     )
 
-    st.subheader("✉️ Receber o PDF por e-mail")
-    chave, remetente = obter_config_email()
-    if not (chave and remetente):
-        st.info("O download já está disponível. O envio por e-mail será habilitado "
-                "quando o responsável configurar o serviço de e-mail no Streamlit.")
-    else:
-        if st.session_state.get("email_enviado", False):
-            st.success("Solicitação de envio recebida pelo serviço de e-mail. "
-                       "Confira a caixa de entrada e o spam.")
-        else:
-            with st.form("form_enviar_email"):
-                destinatario = st.text_input("Seu e-mail", placeholder="aluno@exemplo.com", max_chars=254)
-                concorda = st.checkbox(
-                    "Autorizo o envio do meu relatório comportamental para o e-mail informado."
-                )
-                enviar = st.form_submit_button("Enviar meu PDF por e-mail")
-            if enviar:
-                # Validação básica de endereço; entrega depende do provedor.
-                valido = bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", destinatario.strip()))
-                if not valido:
-                    st.warning("Informe um endereço de e-mail válido.")
-                elif not concorda:
-                    st.warning("Marque a autorização para solicitar o envio.")
-                else:
-                    try:
-                        with st.spinner("Solicitando o envio do relatório..."):
-                            enviar_pdf_por_email(destinatario.strip(), st.session_state.nome, pdf)
-                        st.session_state.email_enviado = True
-                        st.success("Envio solicitado com sucesso! Confira sua caixa de entrada e spam.")
-                    except urllib.error.HTTPError as erro:
-                        st.error("Não foi possível solicitar o envio. Verifique com o responsável "
-                                 "a configuração do remetente e do serviço de e-mail. "
-                                 f"Código do serviço: {erro.code}.")
-                    except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError) as erro:
-                        st.error("Não foi possível enviar o relatório por e-mail neste momento. "
-                                 "Use o botão de download ou tente novamente mais tarde.")
+    st.caption("O relatório é gerado nesta sessão e disponibilizado somente para download. Nenhum e-mail é solicitado.")
 
 
 elif etapa == "encerrado":
