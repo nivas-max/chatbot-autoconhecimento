@@ -1,4 +1,19 @@
 import streamlit as st
+import io
+import re
+import json
+import base64
+import urllib.request
+import urllib.error
+from xml.sax.saxutils import escape
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, KeepTogether
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.colors import HexColor
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from pathlib import Path
 
 st.set_page_config(page_title="Autoconhecimento | Avaliação comportamental", page_icon="💬")
 st.title("💬 Chatbot de Autoconhecimento")
@@ -287,6 +302,110 @@ PERFIS = {'Pragmático': 'Perfil pragmático\n'
 
 INTRODUCAO = 'A partir de agora vamos fazer alguns testes. Para cada uma das questões abaixo, você dispõe de duas alternativas. Dentre elas você deverá escolher a opção que mais se aproxima do seu modo de ser, mesmo que ela não descreva exatamente a sua forma de agir. Imagine, então, seu cotidiano e como você se comporta na maioria das vezes. Digite a letra que corresponde à alternativa. Vamos começar?'
 
+# O PDF é montado em memória. Nenhum relatório é gravado em uma pasta pública.
+def gerar_pdf(nome, idade, contagem, resultado, vencedores):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=45, leftMargin=45,
+                            topMargin=54, bottomMargin=50, title="Relatório de Autoconhecimento")
+
+    fonte = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    negrito = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    if fonte.exists() and negrito.exists():
+        if "RelatorioSans" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont("RelatorioSans", str(fonte)))
+            pdfmetrics.registerFont(TTFont("RelatorioSans-Bold", str(negrito)))
+        pdfmetrics.registerFontFamily("RelatorioSans", normal="RelatorioSans", bold="RelatorioSans-Bold")
+        familia = "RelatorioSans"
+        familia_bold = "RelatorioSans-Bold"
+    else:
+        # Alternativa com fonte embutida para ambientes que não têm DejaVu.
+        familia, familia_bold = "Helvetica", "Helvetica-Bold"
+
+    styles = {
+        "titulo": ParagraphStyle("TituloRel", fontName=familia_bold, fontSize=18,
+                                  leading=24, alignment=TA_CENTER, textColor=HexColor("#163D59"), spaceAfter=18),
+        "subtitulo": ParagraphStyle("SubtituloRel", fontName=familia_bold, fontSize=12,
+                                     leading=17, textColor=HexColor("#163D59"), spaceBefore=14, spaceAfter=7),
+        "normal": ParagraphStyle("TextoRel", fontName=familia, fontSize=9.3,
+                                  leading=15, spaceAfter=8),
+    }
+    story = [Paragraph("Relatório de Autoconhecimento", styles["titulo"]),
+             Paragraph(f"<b>Participante:</b> {escape(str(nome))}", styles["normal"]),
+             Paragraph(f"<b>Idade:</b> {idade} anos", styles["normal"]),
+             Paragraph("Questionário comportamental de 13 questões", styles["normal"]),
+             Paragraph("Contagem das alternativas", styles["subtitulo"])]
+    story.append(Paragraph(" | ".join(f"{letra}: {contagem[letra]}" for letra in "CDEP"), styles["normal"]))
+    story.append(Paragraph("Pontuação por perfil", styles["subtitulo"]))
+    for perfil, valor in resultado.items():
+        story.append(Paragraph(f"{escape(perfil)}: {valor} pontos", styles["normal"]))
+    rotulo = "Perfil predominante" if len(vencedores) == 1 else "Perfis empatados na maior pontuação"
+    story.append(Paragraph(rotulo + ": " + ", ".join(escape(v) for v in vencedores), styles["subtitulo"]))
+
+    secoes = {"Como você costuma agir", "O que você costuma gostar", "O que pode incomodar você",
+              "Sabotadores para observar", "Um conselho para sua vida profissional",
+              "Um conselho para sua vida pessoal", "Profissões que podem combinar com você"}
+    for perfil in vencedores:
+        story.append(Paragraph(escape("Perfil " + perfil.lower()), styles["subtitulo"]))
+        for linha in PERFIS[perfil].splitlines()[1:]:
+            linha = linha.strip()
+            if not linha:
+                continue
+            if linha in secoes:
+                story.append(Paragraph(escape(linha), styles["subtitulo"]))
+            else:
+                # Texto de origem é texto puro; não interpretar marcação digitada por usuários.
+                story.append(Paragraph(escape(linha).replace("\t", " "), styles["normal"]))
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("Atividade de autoconhecimento, não um teste psicológico validado ou diagnóstico.",
+                           styles["normal"]))
+    story.append(Paragraph("Obrigado por chegar até aqui!", styles["normal"]))
+    def rodape(canvas, doc_obj):
+        canvas.setFont(familia, 8)
+        canvas.setFillColor(HexColor("#667085"))
+        canvas.drawRightString(A4[0]-45, 28, f"Página {doc_obj.page}")
+    doc.build(story, onFirstPage=rodape, onLaterPages=rodape)
+    return buffer.getvalue()
+
+
+def obter_config_email():
+    # Na ausência dos Secrets, o download continua disponível.
+    try:
+        chave = st.secrets.get("RESEND_API_KEY", "")
+        remetente = st.secrets.get("EMAIL_REMETENTE", "")
+        return str(chave).strip(), str(remetente).strip()
+    except (FileNotFoundError, KeyError):
+        return "", ""
+
+
+def enviar_pdf_por_email(destinatario, nome, pdf_bytes):
+    chave, remetente = obter_config_email()
+    if not chave or not remetente:
+        raise ValueError("Envio por e-mail não configurado pelo responsável pelo aplicativo.")
+    payload = {
+        "from": remetente,
+        "to": [destinatario],
+        "subject": "Seu relatório de autoconhecimento",
+        "html": (f"<p>Olá, {escape(nome)}!</p>"
+                 "<p>Segue em anexo seu relatório de autoconhecimento em PDF.</p>"
+                 "<p>Obrigado por participar!</p>"),
+        "attachments": [{"filename": "relatorio_autoconhecimento.pdf",
+                         "content": base64.b64encode(pdf_bytes).decode("ascii")}]
+    }
+    requisicao = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {chave}", "Content-Type": "application/json",
+                 "User-Agent": "AutoconhecimentoStreamlit/1.0"},
+        method="POST",
+    )
+    with urllib.request.urlopen(requisicao, timeout=20) as resposta:
+        retorno = json.loads(resposta.read().decode("utf-8"))
+    if not retorno.get("id"):
+        raise RuntimeError("O serviço de e-mail não confirmou a solicitação.")
+    return retorno["id"]
+
+
 # Inicia uma conversa separada para cada visitante.
 if "etapa" not in st.session_state:
     st.session_state.etapa = "nome"
@@ -406,6 +525,54 @@ elif etapa == "resultado":
         st.markdown(PERFIS[perfil])
     st.info("Este questionário é uma atividade de autoconhecimento e não um teste psicológico validado nem um diagnóstico.")
     st.write("**Obrigado por chegar até aqui!**")
+
+    st.divider()
+    st.subheader("📄 Seu relatório em PDF")
+    pdf = gerar_pdf(st.session_state.nome, st.session_state.idade,
+                    contagem, resultado, vencedores)
+    st.download_button(
+        "⬇️ Baixar meu relatório em PDF", data=pdf,
+        file_name="relatorio_autoconhecimento.pdf", mime="application/pdf",
+        use_container_width=True,
+    )
+
+    st.subheader("✉️ Receber o PDF por e-mail")
+    chave, remetente = obter_config_email()
+    if not (chave and remetente):
+        st.info("O download já está disponível. O envio por e-mail será habilitado "
+                "quando o responsável configurar o serviço de e-mail no Streamlit.")
+    else:
+        if st.session_state.get("email_enviado", False):
+            st.success("Solicitação de envio recebida pelo serviço de e-mail. "
+                       "Confira a caixa de entrada e o spam.")
+        else:
+            with st.form("form_enviar_email"):
+                destinatario = st.text_input("Seu e-mail", placeholder="aluno@exemplo.com", max_chars=254)
+                concorda = st.checkbox(
+                    "Autorizo o envio do meu relatório comportamental para o e-mail informado."
+                )
+                enviar = st.form_submit_button("Enviar meu PDF por e-mail")
+            if enviar:
+                # Validação básica de endereço; entrega depende do provedor.
+                valido = bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", destinatario.strip()))
+                if not valido:
+                    st.warning("Informe um endereço de e-mail válido.")
+                elif not concorda:
+                    st.warning("Marque a autorização para solicitar o envio.")
+                else:
+                    try:
+                        with st.spinner("Solicitando o envio do relatório..."):
+                            enviar_pdf_por_email(destinatario.strip(), st.session_state.nome, pdf)
+                        st.session_state.email_enviado = True
+                        st.success("Envio solicitado com sucesso! Confira sua caixa de entrada e spam.")
+                    except urllib.error.HTTPError as erro:
+                        st.error("Não foi possível solicitar o envio. Verifique com o responsável "
+                                 "a configuração do remetente e do serviço de e-mail. "
+                                 f"Código do serviço: {erro.code}.")
+                    except (urllib.error.URLError, TimeoutError, ValueError, RuntimeError) as erro:
+                        st.error("Não foi possível enviar o relatório por e-mail neste momento. "
+                                 "Use o botão de download ou tente novamente mais tarde.")
+
 
 elif etapa == "encerrado":
     st.info("A conversa foi encerrada. Use 'Recomeçar a conversa' quando quiser participar.")
