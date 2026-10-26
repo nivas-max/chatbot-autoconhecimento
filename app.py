@@ -11,7 +11,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from pathlib import Path
 
 st.set_page_config(page_title="Autoconhecimento | Avaliação comportamental", page_icon="💬")
-st.title("💬 Chatbot de Autoconhecimento")
+st.title("💬 Mapa de Estilos comportamentais")
 st.caption("Questionário de reflexão comportamental — 13 questões")
 
 # Cada questão contém duas alternativas: (letra, descrição).
